@@ -295,7 +295,15 @@ async fn main() -> Result<()> {
     // ownership of TPM access, which will not be implemented here.
     let tpm_ownerpassword = &config.agent.tpm_ownerpassword;
     if !tpm_ownerpassword.is_empty() {
-        let auth = Auth::try_from(tpm_ownerpassword.as_bytes())?;
+        // REMOVE BEFORE COMMIT ##########################################################################################################################################
+        let auth = if tpm_ownerpassword.starts_with("hex:") {
+            let (_, hex_ownerpassword) = tpm_ownerpassword.split_at(4);
+            let decoded_ownerpassword = hex::decode(hex_ownerpassword)
+                .expect("Failed to decode tpm_ownerpassword hex");
+            Auth::try_from(decoded_ownerpassword)?
+        } else {
+            Auth::try_from(tpm_ownerpassword.as_bytes())?
+        };
         ctx.as_mut().tr_set_auth(Hierarchy::Endorsement.into(), auth)
             .map_err(|e| {
                 Error::Configuration(format!(
@@ -394,16 +402,12 @@ async fn main() -> Result<()> {
             regen_idev
         } else {
             info!("Collecting persisted IDevID.");
-            ctx.idevid_from_handle(
-                config.agent.idevid_handle.as_str(),
-                config.agent.idevid_password.as_str(),
-            )?
+            ctx.idevid_from_handle(config.agent.idevid_handle.as_str(), config.agent.idevid_password.as_str())?
         };
         /// Check that recreated/collected IDevID key matches the one in the certificate
         if crypto::check_x509_key(
             &idevid_cert.clone().ok_or(Error::Other(
-                "IAK/IDevID enabled but IDevID cert could not be used"
-                    .to_string(),
+                "IAK/IDevID enabled but IDevID cert could not be used".to_string(),
             ))?,
             idevid.clone().public,
         )? {
@@ -422,16 +426,12 @@ async fn main() -> Result<()> {
             /// If a handle has been set, try to collect from the handle
             /// If there is an IAK password, add the password to the handle
             info!("Collecting persisted IAK.");
-            ctx.iak_from_handle(
-                config.agent.iak_handle.as_str(),
-                config.agent.iak_password.as_str(),
-            )?
+            ctx.iak_from_handle(config.agent.iak_handle.as_str(), config.agent.iak_password.as_str())?
         };
         /// Check that recreated/collected IAK key matches the one in the certificate
         if crypto::check_x509_key(
             &iak_cert.clone().ok_or(Error::Other(
-                "IAK/IDevID enabled but IAK cert could not be used"
-                    .to_string(),
+                "IAK/IDevID enabled but IAK cert could not be used".to_string(),
             ))?,
             iak.clone().public,
         )? {
