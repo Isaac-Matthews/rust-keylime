@@ -43,7 +43,7 @@ use tss_esapi::{
         structure_tags::AttestationType,
     },
     structures::{
-        Attest, AttestInfo, Data, Digest, DigestValues, EccParameter,
+        Attest, AttestInfo, Auth, Data, Digest, DigestValues, EccParameter,
         EccPoint, EccScheme, EncryptedSecret, HashScheme, IdObject,
         KeyDerivationFunctionScheme, Name, PcrSelectionList,
         PcrSelectionListBuilder, PcrSlot, PublicBuilder,
@@ -136,6 +136,13 @@ pub enum TpmError {
     /// Error creating handle from persistent TPM handle
     #[error("Error creating handle from persistent TPM handle {handle}")]
     TSSHandleFromPersistentHandleError {
+        handle: String,
+        source: tss_esapi::Error,
+    },
+
+    /// Error setting auth for persistent TPM handle
+    #[error("Error setting auth for persistent TPM handle {handle}")]
+    TSSHandleSetAuthError {
         handle: String,
         source: tss_esapi::Error,
     },
@@ -613,6 +620,94 @@ impl Context {
         Ok(ak_handle)
     }
 
+    /// Load a key handle from a string of the handle location
+    /// If a password is supplied, authorise the handle
+    /// # Arguments
+    ///
+    /// `handle` : The string of the handle, eg. from config
+    /// `password` ; The string password, to be converted to hex if there is the "hex:" prefix
+    ///
+    /// # Return
+    /// The corresponding KeyHandle, or a TPMError
+    pub fn get_key_handle(
+        &mut self,
+        handle: &str,
+        password: &str,
+    ) -> Result<KeyHandle> {
+        let handle = u32::from_str_radix(handle.trim_start_matches("0x"), 16)
+            .map_err(|source| TpmError::NumParse {
+                origin: handle.to_string(),
+                source,
+            })?;
+        let key_handle: KeyHandle = self
+            .inner
+            .tr_from_tpm_public(TpmHandle::Persistent(
+                PersistentTpmHandle::new(handle).map_err(|source| {
+                    TpmError::TSSNewPersistentHandleError {
+                        handle: handle.to_string(),
+                        source,
+                    }
+                })?,
+            ))
+            .map_err(|source| TpmError::TSSHandleFromPersistentHandleError {
+                handle: handle.to_string(),
+                source,
+            })?
+            .into();
+        if !password.is_empty() {
+            let auth = if password.starts_with("hex:") {
+                let (_, hex_password) = password.split_at(4);
+                let decoded_password = hex::decode(hex_password)
+                    .expect("Failed to decode iak_password hex");
+                Auth::try_from(decoded_password)?
+            } else {
+                Auth::try_from(password.as_bytes())?
+            };
+            self.as_mut().tr_set_auth(key_handle.into(), auth).map_err(
+                |source| TpmError::TSSHandleSetAuthError {
+                    handle: handle.to_string(),
+                    source,
+                },
+            )?;
+        };
+
+        Ok(key_handle)
+    }
+
+    /// Create an IDevID object from one persisted in TPM using its handle
+    pub fn idevid_from_handle(
+        &mut self,
+        handle: &str,
+        password: &str,
+    ) -> Result<IDevIDResult> {
+        let idevid_handle = self.get_key_handle(handle, password)?;
+        let (idevid_pub, _, _) = self
+            .inner
+            .read_public(idevid_handle)
+            .map_err(|source| TpmError::TSSReadPublicError { source })?;
+        Ok(IDevIDResult {
+            public: idevid_pub,
+            handle: idevid_handle,
+        })
+    }
+
+    /// Create an IAK object from one persisted in TPM using its handle
+    pub fn iak_from_handle(
+        &mut self,
+        handle: &str,
+        password: &str,
+    ) -> Result<IAKResult> {
+        let iak_handle = self.get_key_handle(handle, password)?;
+        let (iak_pub, _, _) = self
+            .inner
+            .read_public(iak_handle)
+            .map_err(|source| TpmError::TSSReadPublicError { source })?;
+        Ok(IAKResult {
+            public: iak_pub,
+            handle: iak_handle,
+        })
+    }
+
     /// Creates an IDevID
     pub fn create_idevid(
         &mut self,
@@ -918,7 +1013,7 @@ impl Context {
             ),
             HashingAlgorithm::Sha512 => (
                 IAK_AUTH_POLICY_SHA512[0..64].to_vec(),
-                RsaKeyBits::Rsa2048,
+                RsaKeyBits::Rsa4096,
                 EccCurve::NistP521,
             ),
             _ => (
